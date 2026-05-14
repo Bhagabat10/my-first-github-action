@@ -1,627 +1,1024 @@
-# DevOps Infrastructure Design — Azure + Cloudflare
+# Azure + Cloudflare Edge Architecture for Venue Experience Platform
 
-## Overview
+## Introduction
 
-This document describes a production-grade infrastructure design on **Microsoft Azure** with **Cloudflare at the edge**, supporting:
+This document outlines a modern cloud-native architecture for a venue experience platform hosted on Microsoft Azure with Cloudflare operating at the global edge.
 
-- Web app (central configuration UI)
+The platform is designed to support operational management, real-time device communication, large-scale telemetry ingestion, media processing, and customer engagement workloads across multiple venues and geographic regions.
+
+The solution emphasizes:
+
+- Secure and resilient edge delivery
+- Scalable API and event-driven backend services
+- High-throughput ingestion and processing pipelines
+- Reliable asynchronous communication between systems and devices
+- Efficient video processing and global content delivery
+- Enterprise-grade security and observability
+- Fully automated infrastructure provisioning and deployments
+
+Cloudflare provides global edge protection, caching, and traffic acceleration, while Azure delivers the core compute, data, messaging, and analytics services required to operate the platform at scale.
+
+The architecture follows cloud-native and zero-trust principles, using managed services wherever possible to reduce operational overhead while maintaining flexibility for future growth.
+
+The document also includes recommendations for:
+
+- CI/CD pipelines
+- Infrastructure as Code (IaC)
+- Security controls
+- Scalability strategies
+- Reliability and disaster recovery
+- Monitoring and observability
+- Operational automation
+
+The overall goal is to provide a production-ready foundation capable of supporting high availability, burst traffic patterns, global media delivery, and long-term platform evolution.
+
+---
+
+# Azure + Cloudflare Edge Architecture for Venue Experience Platform
+
+## 1. Overview
+
+This document describes a scalable, secure, and resilient cloud architecture hosted in Microsoft Azure with Cloudflare at the edge.
+
+The platform supports:
+
+- Web application for central configuration
 - Backend APIs
-- Log ingestion & processing from in-venue devices
+- Log ingestion and processing from in-venue devices
 - Video processing and serving for in-game moments
-- SMS & Email sending to guests
-- Asynchronous device ↔ backend communication
-- CI/CD pipelines and Infrastructure as Code
+- SMS sending to guests
+- Email sending to guests
+- Asynchronous communication between devices and backend
+- CI/CD pipelines
+- Infrastructure as Code (IaC)
 
 ---
 
-## Architecture Diagram (Textual)
+# 2. High-Level Architecture
 
-```
-[In-Venue Devices]
-       │
-       ├──── MQTT / AMQP ──────────────────► Azure Service Bus / Event Hub
-       │                                            │
-       └──── HTTPS logs ──►  Cloudflare WAF ──►  Azure API Management
-                                    │
-                         ┌──────────┴──────────┐
-                         │                     │
-                   [Config Web App]      [Backend APIs]
-                  (Azure Static Web    (Azure Container Apps /
-                   Apps / App Svc)       AKS — containerised)
-                         │                     │
-                    Azure AD B2C         Azure Service Bus
-                                               │
-                         ┌─────────────────────┤
-                         │                     │
-                   [Log Processor]       [Video Processor]
-                (Azure Functions /     (Azure Media Services /
-                 Stream Analytics)       Container Jobs)
-                         │                     │
-                   Azure Monitor         Azure Blob Storage
-                   Log Analytics         + Azure CDN / CF
-                         │
-                   [Notification Workers]
-                   SMS: Azure Communication Services / Twilio
-                   Email: Azure Communication Services / SendGrid
+```text
+                             +----------------------+
+                             |      End Users       |
+                             |  Guests / Operators  |
+                             +----------+-----------+
+                                        |
+                              HTTPS / WAF / CDN
+                                        |
+                         +--------------v---------------+
+                         |          Cloudflare          |
+                         |------------------------------|
+                         | DNS                          |
+                         | WAF                          |
+                         | DDoS Protection              |
+                         | CDN                          |
+                         | Bot Protection               |
+                         | Rate Limiting                |
+                         | Zero Trust Access            |
+                         +--------------+---------------+
+                                        |
+                    +-------------------+-------------------+
+                    |                                       |
+         +----------v----------+                +-----------v----------+
+         | Azure Front Door    |                | Cloudflare Stream /  |
+         | (optional regional  |                | CDN Video Edge       |
+         | routing)            |                +-----------+----------+
+         +----------+----------+                            |
+                    |                                       |
+          +---------+----------------------------+          |
+          |                                      |          |
++---------v---------+               +------------v-------+  |
+| Static Web App    |               | API Management     |  |
+| Azure Static Web  |               | / Application GW   |  |
+| Apps              |               +------------+-------+  |
++-------------------+                            |          |
+                                                   
+                                      +------------v-------------+
+                                      | AKS or Azure Container   |
+                                      | Apps Environment         |
+                                      |--------------------------|
+                                      | Backend APIs             |
+                                      | Device APIs              |
+                                      | Notification Services    |
+                                      | Video Metadata Services  |
+                                      | Worker Services          |
+                                      +------------+-------------+
+                                                   |
+                     +-----------------------------+-----------------------------+
+                     |                             |                             |
+          +----------v---------+      +------------v----------+      +-----------v----------+
+          | Azure Service Bus |      | Azure Event Hubs      |      | Azure Cache for      |
+          | Async Commands     |      | High-volume ingestion |      | Redis                |
+          +----------+---------+      +------------+----------+      +-----------+----------+
+                     |                             |                             |
+                     |                             |                             |
+          +----------v---------+      +------------v----------+      +-----------v----------+
+          | Device Workers     |      | Stream Analytics /   |      | Session / API Cache  |
+          | Queue Consumers    |      | Databricks / Flink   |      +----------------------+
+          +----------+---------+      +------------+----------+
+                     |                             |
+                     |                             |
+          +----------v---------+      +------------v----------+
+          | Azure Cosmos DB    |      | Azure Data Lake       |
+          | Device state       |      | Raw logs/video meta   |
+          +----------+---------+      +------------+----------+
+                     |                             |
+                     |                             |
+          +----------v---------+      +------------v----------+
+          | Azure SQL          |      | Azure Blob Storage    |
+          | Config/App data    |      | Video assets          |
+          +----------+---------+      +------------+----------+
+                     |                             |
+                     |                             |
+          +----------v---------+      +------------v----------+
+          | Azure Communication|      | Azure Media Services  |
+          | Services (SMS)     |      | or FFmpeg Workers     |
+          +--------------------+      +-----------------------+
+
+                       +--------------------------------+
+                       | Email Provider                 |
+                       | Azure Communication Services   |
+                       | or SendGrid                    |
+                       +--------------------------------+
 ```
 
 ---
 
-## Assumptions & Trade-offs
+# 3. Core Platform Components
 
-| Assumption | Trade-off |
+## 3.1 Edge Layer — Cloudflare
+
+### Services Used
+
+- Cloudflare DNS
+- Cloudflare CDN
+- Cloudflare WAF
+- Cloudflare DDoS protection
+- Cloudflare Rate Limiting
+- Cloudflare Bot Management
+- Cloudflare Zero Trust Access
+- Cloudflare Tunnel (optional)
+- Cloudflare Stream (optional for video delivery)
+
+### Responsibilities
+
+- Global edge caching
+- TLS termination
+- DDoS mitigation
+- API protection
+- Geographic routing
+- Bot filtering
+- Secure operator/admin access
+- Video delivery acceleration
+
+### Why Cloudflare at the Edge
+
+- Lower latency globally
+- Reduced Azure egress costs
+- Better protection against volumetric attacks
+- Edge caching for APIs and media
+- Simplified certificate management
+
+---
+
+# 4. Azure Workloads
+
+## 4.1 Web Application
+
+### Recommended Service
+
+Azure Static Web Apps
+
+Alternative:
+
+- Azure App Service
+- Next.js hosted in Container Apps
+
+### Responsibilities
+
+- Venue configuration portal
+- Admin dashboard
+- User management
+- Analytics visualization
+
+### Authentication
+
+- Microsoft Entra ID (Azure AD)
+- Optional B2B federation
+- MFA enforced via Conditional Access
+
+---
+
+## 4.2 Backend APIs
+
+### Recommended Service
+
+Azure Kubernetes Service (AKS)
+
+Alternative:
+
+- Azure Container Apps (lower operational overhead)
+
+### Responsibilities
+
+- Public APIs
+- Device APIs
+- Internal services
+- Notification orchestration
+- Video orchestration
+- Business workflows
+
+### Recommended Architecture
+
+Microservices with:
+
+- REST APIs
+- gRPC internal communication
+- Horizontal autoscaling
+- Stateless workloads
+
+---
+
+## 4.3 Device Communication Layer
+
+### Services
+
+- Azure Service Bus
+- Azure Event Hubs
+- MQTT broker (optional)
+
+### Pattern
+
+| Use Case | Recommended Service |
 |---|---|
-| In-venue devices are constrained IoT/edge hardware (MQTT preferred) | MQTT over Azure Service Bus is simpler than raw AMQP; slightly less throughput headroom |
-| Video moments are short clips (highlights), not live streams | Azure Media Services / Blob + CDN is cost-effective; full live streaming would need Azure Live Events (expensive) |
-| Guest volume per venue peaks at ~50 k concurrent | Container Apps auto-scaling handles this; AKS gives more control at the cost of more ops overhead |
-| Multi-region is a day-2 concern; primary region: UK South | Single-region simplifies day-1; geo-replication of Cosmos DB / Service Bus added later |
-| Internal staff use the config web app (not public) | Azure AD (Entra ID) used; no need for B2C on the config app |
-| SMS/Email volumes are burst, not continuous | Managed services (Azure Communication Services) avoid maintaining own SMTP/SMPP |
-| IaC tool: Terraform (open source, provider-agnostic) | Bicep is Azure-native and simpler, but Terraform skills are more portable |
+| High-volume telemetry/logs | Event Hubs |
+| Reliable async commands | Service Bus |
+| Real-time bidirectional | WebSockets / SignalR |
+| IoT device connectivity | IoT Hub (optional) |
+
+### Device Flow
+
+1. Devices authenticate using certificates or managed identities.
+2. Devices push logs/events into Event Hubs.
+3. Backend workers process events asynchronously.
+4. Commands to devices are sent via Service Bus queues/topics.
+5. Devices poll or subscribe to command channels.
 
 ---
 
-## Service Map
+# 5. Log Ingestion & Processing
 
-### 1. Edge — Cloudflare
+## Ingestion
 
-- **WAF**: Block OWASP Top 10, rate-limit per IP/venue
-- **DDoS**: Cloudflare Magic Transit / HTTP DDoS protection
-- **CDN**: Cache static assets and video segments at PoP closest to venue
-- **DNS**: Cloudflare DNS with orange-cloud proxying for all public endpoints
-- **Workers** (optional): JWT pre-validation at edge, A/B routing, geo-based redirects
+### Recommended Services
 
-### 2. Config Web App
+- Azure Event Hubs
+- Azure Data Explorer (optional)
+- Azure Monitor
 
-- **Hosting**: Azure Static Web Apps (if React/Vue SPA) or Azure App Service (if SSR)
-- **Auth**: Microsoft Entra ID (Azure AD) — OIDC/OAuth2, staff login only
-- **Backend**: Calls Backend APIs via APIM
+### Processing
 
-### 3. Backend APIs
+- Azure Stream Analytics
+- Azure Databricks
+- Apache Flink on AKS
 
-- **Hosting**: Azure Container Apps (preferred) — serverless containers with built-in KEDA scaling
-- **Gateway**: Azure API Management (APIM) — auth, throttling, versioning, developer portal
-- **Language**: Any (Node.js / Python / .NET — containerised)
-- **Data**: Azure Cosmos DB (NoSQL, globally distributed) or Azure PostgreSQL Flexible Server
+### Storage
 
-### 4. Log Ingestion & Processing
+- Azure Data Lake Storage Gen2
+- Azure Blob Storage
 
-- **Ingest**: Devices POST logs to APIM endpoint → Azure Event Hubs (high-throughput, partitioned)
-- **Processing**: Azure Stream Analytics (SQL-based, real-time) or Azure Functions (event-driven)
-- **Storage**: Azure Data Lake Storage Gen2 (raw) + Azure Synapse / Fabric (analytics)
-- **Alerting**: Log Analytics Workspace → Azure Monitor Alerts
+### Data Pipeline
 
-### 5. Video Processing & Serving
+```text
+Venue Devices
+    -> Event Hubs
+    -> Stream Processing
+    -> Data Lake
+    -> Aggregation/Alerting
+    -> Monitoring Dashboards
+```
 
-- **Upload**: Devices or backend push raw clips to Azure Blob Storage (private container) via SAS tokens
-- **Processing**: Azure Container Apps Jobs (FFmpeg) triggered by Blob events via Event Grid
-  - Transcode to HLS/DASH adaptive bitrate
-  - Generate thumbnails
-  - Store outputs to public Blob container
-- **Serving**: Azure CDN (or Cloudflare in front of Blob) — cache video segments at edge
+### Benefits
 
-### 6. SMS Sending
-
-- **Service**: Azure Communication Services (SMS) — managed, no infra, pay-per-message
-- **Fallback**: Twilio (via abstraction layer in code so provider is swappable)
-- **Queue**: Notifications requested via Service Bus queue → worker Container App sends SMS
-
-### 7. Email Sending
-
-- **Service**: Azure Communication Services (Email) with custom domain + DKIM/SPF/DMARC
-- **Fallback**: SendGrid (Azure Marketplace integration)
-- **Queue**: Same pattern — Service Bus → worker → send
-
-### 8. Async Device ↔ Backend Communication
-
-- **Protocol**: MQTT via Azure IoT Hub (managed, scales to millions of devices, built-in device registry) or Azure Service Bus (simpler, if devices support AMQP/HTTPS)
-- **Pattern**: Devices publish to topic → IoT Hub routes to Service Bus → backend workers consume
-- **Commands back to devices**: IoT Hub direct methods or C2D messages
+- Scales to millions of events/sec
+- Decoupled ingestion and processing
+- Supports replay and analytics
+- Enables machine learning later
 
 ---
 
-## Infrastructure as Code
+# 6. Video Processing & Serving
 
-All infrastructure defined in **Terraform**, structured as:
+## Upload & Processing
 
-```
-infra/
-├── main.tf                  # Root module, calls child modules
-├── variables.tf
-├── outputs.tf
-├── terraform.tfvars.example
-├── backend.tf               # Azure Storage remote state
-└── modules/
-    ├── networking/          # VNet, subnets, NSGs, Private Endpoints
-    ├── cloudflare/          # DNS records, WAF rules, Page Rules
-    ├── apim/                # API Management instance + APIs
-    ├── container_apps/      # Container Apps Environment + apps
-    ├── event_hubs/          # Event Hub Namespace + hubs
-    ├── service_bus/         # Service Bus Namespace + queues/topics
-    ├── iot_hub/             # IoT Hub + routing rules
-    ├── storage/             # Blob containers, lifecycle policies
-    ├── cdn/                 # Azure CDN profile + endpoints
-    ├── cosmos_db/           # Cosmos DB account + databases
-    ├── monitoring/          # Log Analytics, App Insights, Alerts
-    ├── communication/       # Azure Communication Services
-    └── identity/            # Managed Identities, Key Vault, RBAC
+### Recommended Services
+
+- Azure Blob Storage
+- Azure Media Services (or replacement pipeline)
+- FFmpeg worker containers on AKS
+- Azure Functions for orchestration
+
+### Pipeline
+
+```text
+Raw Video Upload
+    -> Blob Storage
+    -> Queue/Event Trigger
+    -> Video Processing Workers
+    -> Encoding/Thumbnailing/Clipping
+    -> Optimized Blob Storage
+    -> Cloudflare CDN Delivery
 ```
 
-### Key Terraform Snippets
+### Processing Tasks
 
-```hcl
-# modules/container_apps/main.tf
-resource "azurerm_container_app_environment" "main" {
-  name                       = "cae-${var.env}-${var.location_short}"
-  location                   = var.location
-  resource_group_name        = var.resource_group_name
-  log_analytics_workspace_id = var.log_analytics_id
-}
+- Clip generation
+- Encoding/transcoding
+- Thumbnail extraction
+- Highlight generation
+- Metadata extraction
 
-resource "azurerm_container_app" "api" {
-  name                         = "ca-api-${var.env}"
-  container_app_environment_id = azurerm_container_app_environment.main.id
-  resource_group_name          = var.resource_group_name
-  revision_mode                = "Multiple"
+### Delivery
 
-  ingress {
-    external_enabled = true
-    target_port      = 8080
-    traffic_weight {
-      percentage      = 100
-      latest_revision = true
-    }
-  }
+- Cloudflare CDN caches video globally
+- Signed URLs for secure playback
+- Adaptive bitrate streaming (HLS/DASH)
 
-  template {
-    min_replicas = 1
-    max_replicas = 20
+---
 
-    http_scale_rule {
-      name                = "http-scaler"
-      concurrent_requests = "100"
-    }
+# 7. Notifications
 
-    container {
-      name   = "api"
-      image  = "${var.acr_login_server}/api:${var.image_tag}"
-      cpu    = 0.5
-      memory = "1Gi"
+## SMS
 
-      env {
-        name        = "SERVICE_BUS_CONNECTION"
-        secret_name = "sb-connection"
-      }
-    }
-  }
+### Recommended Services
 
-  secret {
-    name  = "sb-connection"
-    value = var.service_bus_connection_string
-  }
-}
-```
+- Azure Communication Services
+- Twilio (alternative)
 
-```hcl
-# modules/event_hubs/main.tf
-resource "azurerm_eventhub_namespace" "logs" {
-  name                = "evhns-logs-${var.env}"
-  location            = var.location
-  resource_group_name = var.resource_group_name
-  sku                 = "Standard"
-  capacity            = 2  # throughput units; auto-inflate enabled
-  auto_inflate_enabled     = true
-  maximum_throughput_units = 10
-}
+### Flow
 
-resource "azurerm_eventhub" "device_logs" {
-  name                = "device-logs"
-  namespace_name      = azurerm_eventhub_namespace.logs.name
-  resource_group_name = var.resource_group_name
-  partition_count     = 32
-  message_retention   = 7
-}
+```text
+Backend Event
+    -> Notification Queue
+    -> SMS Worker
+    -> SMS Provider
 ```
 
 ---
 
-## CI/CD Pipelines
+## Email
 
-All pipelines live in **Azure DevOps (ADO)**, using YAML pipelines stored in the repo alongside the code. ADO integrates natively with Azure (service connections, ACR, Key Vault variable groups) and is the natural choice given the Azure-first stack.
+### Recommended Services
 
-### ADO Setup
+- SendGrid
+- Azure Communication Services Email
 
-- **Organisation**: one ADO org, one project per product
-- **Service connections**: Azure Resource Manager (Workload Identity Federation — no client secrets) per environment; Docker Registry connection to ACR
-- **Variable groups**: linked to Azure Key Vault per environment (`vg-dev`, `vg-staging`, `vg-production`) — secrets pulled at runtime, never stored in ADO
-- **Environments**: ADO Environments (`staging`, `production`) with approval gates on production
-- **Agent pool**: Microsoft-hosted `ubuntu-latest` for most jobs; self-hosted agents in the VNet for jobs that need private endpoint access
+### Features
 
-### Pipeline Structure
+- Transactional email
+- Templates
+- Retry handling
+- Bounce tracking
+- Analytics
 
+---
+
+# 8. Data Layer
+
+## Azure SQL Database
+
+### Stores
+
+- User accounts
+- Venue configuration
+- Permissions
+- Relational business data
+
+### Features
+
+- Geo-replication
+- Automatic backups
+- PITR recovery
+
+---
+
+## Azure Cosmos DB
+
+### Stores
+
+- Device state
+- Session state
+- High-scale operational data
+- Event metadata
+
+### Why Cosmos DB
+
+- Global distribution
+- Massive horizontal scale
+- Low latency reads/writes
+- Flexible schema
+
+---
+
+## Redis Cache
+
+### Uses
+
+- Session cache
+- API response caching
+- Rate limiting support
+- Distributed locks
+
+---
+
+# 9. Networking Architecture
+
+## Core Principles
+
+- Private networking by default
+- Zero trust networking
+- Minimize public exposure
+- Segmented environments
+
+## Recommended Design
+
+### Virtual Networks
+
+Separate VNets/subnets for:
+
+- Ingress
+- AKS
+- Data services
+- Management
+- CI/CD runners
+
+### Connectivity
+
+- Private Endpoints for PaaS services
+- Azure Firewall
+- NSGs
+- Bastion Host
+- VPN/ExpressRoute if required
+
+### Public Exposure
+
+Only:
+
+- Cloudflare edge
+- Azure Front Door/App Gateway
+
+Everything else remains private.
+
+---
+
+# 10. Security
+
+## Identity & Access
+
+### Recommended
+
+- Microsoft Entra ID
+- RBAC everywhere
+- Managed identities
+- Least privilege
+
+### Human Access
+
+- MFA mandatory
+- Conditional Access
+- Just-in-time admin access
+- Privileged Identity Management
+
+---
+
+## Application Security
+
+### Practices
+
+- OAuth2/OIDC
+- JWT validation
+- API rate limiting
+- Secret rotation
+- Dependency scanning
+- SAST/DAST
+
+### Secret Management
+
+Azure Key Vault:
+
+- Certificates
+- API keys
+- DB credentials
+- Signing keys
+
+---
+
+## Infrastructure Security
+
+### Controls
+
+- Private endpoints
+- WAF rules
+- DDoS protection
+- Network segmentation
+- Disk encryption
+- TLS 1.2+
+- CIS hardening
+
+---
+
+# 11. Scalability
+
+## Horizontal Scale
+
+### AKS / Container Apps
+
+Autoscaling based on:
+
+- CPU
+- Memory
+- Queue depth
+- Event throughput
+- Custom metrics
+
+### Event Hubs
+
+Partition-based scaling.
+
+### Cosmos DB
+
+Autoscale RU/s.
+
+### Blob Storage + CDN
+
+Virtually unlimited video scale.
+
+---
+
+# 12. Reliability & High Availability
+
+## Multi-Zone Design
+
+Deploy workloads across:
+
+- Availability Zones
+- Multiple AKS node pools
+- Zone-redundant databases
+
+## Multi-Region Strategy
+
+Primary + secondary region.
+
+### Active/Passive Recommended
+
+Example:
+
+- UK South (primary)
+- West Europe (secondary)
+
+### Failover Components
+
+- SQL geo-replication
+- Cosmos DB multi-region
+- GRS storage
+- Front Door regional failover
+- Cloudflare health checks
+
+---
+
+# 13. Resiliency
+
+## Failure Handling
+
+### Patterns
+
+- Retry policies
+- Circuit breakers
+- Bulkheads
+- Queue buffering
+- Idempotent processing
+- Dead-letter queues
+
+### Event-Driven Benefits
+
+The asynchronous architecture isolates failures and prevents cascading outages.
+
+---
+
+# 14. Observability
+
+## Monitoring Stack
+
+### Azure Native
+
+- Azure Monitor
+- Application Insights
+- Log Analytics
+- Managed Prometheus
+- Managed Grafana
+
+### Logging
+
+Centralized structured logging:
+
+```text
+Applications
+    -> OpenTelemetry
+    -> Azure Monitor / Log Analytics
 ```
-pipelines/
-├── ci.yml              # On PR: lint, test, build, security scan, push to ACR
-├── cd-staging.yml      # On merge to main: deploy to staging + smoke tests
-├── cd-production.yml   # On release branch/tag: deploy to production (with approval)
-└── infra.yml           # On infra/ changes: terraform plan (PR) / apply (merge)
+
+### Metrics
+
+- API latency
+- Queue depth
+- Event throughput
+- Video processing duration
+- SMS/email delivery metrics
+- Device connectivity
+
+### Tracing
+
+Distributed tracing with OpenTelemetry.
+
+### Alerting
+
+- PagerDuty
+- OpsGenie
+- Microsoft Teams/Slack alerts
+
+---
+
+# 15. CI/CD Pipelines
+
+## Recommended Tooling
+
+### CI/CD Platform
+
+- GitHub Actions
+
+Alternative:
+
+- Azure DevOps
+
+---
+
+## CI Pipeline
+
+### Steps
+
+```text
+Commit
+  -> Lint
+  -> Unit Tests
+  -> Security Scans
+  -> Build Containers
+  -> Integration Tests
+  -> Push Images to ACR
 ```
 
-### CI Pipeline — `pipelines/ci.yml`
+### Security Scanning
 
-Triggered on every pull request targeting `main`.
+- Snyk
+- Trivy
+- Dependabot
+- CodeQL
 
-```yaml
-trigger: none
-pr:
-  branches:
-    include: [main]
+---
 
-pool:
-  vmImage: ubuntu-latest
+## CD Pipeline
 
-variables:
-  - group: vg-staging          # Key Vault-linked variable group (ACR_LOGIN_SERVER, ACR_NAME)
-  - name: imageTag
-    value: $(Build.SourceVersion)  # Git SHA
+### Deployment Flow
 
-stages:
-  - stage: Build
-    jobs:
-      - job: BuildAndTest
-        steps:
-          - checkout: self
-
-          - script: make test
-            displayName: Run unit tests
-
-          - task: Docker@2
-            displayName: Build Docker image
-            inputs:
-              command: build
-              repository: $(ACR_LOGIN_SERVER)/api
-              tags: $(imageTag)
-              Dockerfile: apps/api/Dockerfile
-
-          - script: |
-              curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
-              trivy image --severity CRITICAL,HIGH --exit-code 1 $(ACR_LOGIN_SERVER)/api:$(imageTag)
-            displayName: Trivy security scan
-
-          - task: Docker@2
-            displayName: Push image to ACR
-            inputs:
-              command: push
-              containerRegistry: sc-acr-staging   # ADO service connection
-              repository: api
-              tags: $(imageTag)
+```text
+ACR Image
+   -> Deploy to Dev
+   -> Automated Validation
+   -> Deploy to Staging
+   -> Smoke Tests
+   -> Manual Approval
+   -> Production Deployment
 ```
 
-### CD Staging Pipeline — `pipelines/cd-staging.yml`
+### Deployment Strategies
 
-Triggered automatically on merge to `main`.
+- Blue/Green
+- Canary
+- Rolling deployments
 
-```yaml
-trigger:
-  branches:
-    include: [main]
+### GitOps (Recommended)
 
-pool:
-  vmImage: ubuntu-latest
+Use:
 
-variables:
-  - group: vg-staging
-  - name: imageTag
-    value: $(Build.SourceVersion)
+- ArgoCD
+- FluxCD
 
-stages:
-  - stage: DeployStaging
-    displayName: Deploy to Staging
-    jobs:
-      - deployment: DeployAPI
-        environment: staging          # ADO Environment — records deployment history
-        strategy:
-          runOnce:
-            deploy:
-              steps:
-                - task: AzureCLI@2
-                  displayName: Update Container App revision
-                  inputs:
-                    azureSubscription: sc-azure-staging   # ARM service connection (WIF)
-                    scriptType: bash
-                    scriptLocation: inlineScript
-                    inlineScript: |
-                      az containerapp update \
-                        --name ca-api-staging \
-                        --resource-group rg-app-staging \
-                        --image $(ACR_LOGIN_SERVER)/api:$(imageTag)
+Benefits:
 
-                - script: make smoke-test ENVIRONMENT=staging
-                  displayName: Smoke tests
+- Declarative deployments
+- Auditability
+- Rollback simplicity
+- Drift detection
 
-  - stage: NotifyOnFailure
-    condition: failed()
-    jobs:
-      - job: Notify
-        steps:
-          - task: InvokeRestAPI@1
-            displayName: Post to Teams webhook
-            inputs:
-              connectionType: connectedServiceName
-              serviceConnection: sc-teams-webhook
-              method: POST
-              body: '{"text":"Staging deploy failed — $(Build.BuildNumber)"}'
-```
+---
 
-### CD Production Pipeline — `pipelines/cd-production.yml`
+# 16. Infrastructure as Code (IaC)
 
-Triggered on a release branch (`release/*`) or manual tag. Requires an ADO approval gate before deploying.
+## Recommended Tool
 
-```yaml
-trigger:
-  branches:
-    include: [release/*]
+Terraform
 
-pool:
-  vmImage: ubuntu-latest
+Alternative:
 
-variables:
-  - group: vg-production
-  - name: imageTag
-    value: $(Build.SourceVersion)
+- Bicep
 
-stages:
-  - stage: DeployProduction
-    displayName: Deploy to Production
-    jobs:
-      - deployment: DeployAPI
-        environment: production       # Has approval check configured in ADO UI
-        strategy:
-          runOnce:
-            deploy:
-              steps:
-                - task: AzureCLI@2
-                  displayName: Blue/green — route 10% traffic to new revision
-                  inputs:
-                    azureSubscription: sc-azure-production
-                    scriptType: bash
-                    scriptLocation: inlineScript
-                    inlineScript: |
-                      az containerapp revision copy \
-                        --name ca-api-production \
-                        --resource-group rg-app-production \
-                        --image $(ACR_LOGIN_SERVER)/api:$(imageTag)
+---
 
-                      NEW_REVISION=$(az containerapp revision list \
-                        --name ca-api-production \
-                        --resource-group rg-app-production \
-                        --query "[0].name" -o tsv)
+## Terraform Structure
 
-                      az containerapp ingress traffic set \
-                        --name ca-api-production \
-                        --resource-group rg-app-production \
-                        --revision-weight latest=10 previous=90
-
-                - script: make smoke-test ENVIRONMENT=production
-                  displayName: Production smoke tests
-
-                - task: AzureCLI@2
-                  displayName: Shift 100% traffic to new revision
-                  inputs:
-                    azureSubscription: sc-azure-production
-                    scriptType: bash
-                    scriptLocation: inlineScript
-                    inlineScript: |
-                      az containerapp ingress traffic set \
-                        --name ca-api-production \
-                        --resource-group rg-app-production \
-                        --revision-weight latest=100
-```
-
-### Infrastructure Pipeline — `pipelines/infra.yml`
-
-PR → `terraform plan` output posted as PR comment. Merge to `main` → `terraform apply`.
-
-```yaml
-trigger:
-  branches:
-    include: [main]
-  paths:
-    include: [infra/**]
-
-pr:
-  paths:
-    include: [infra/**]
-
-pool:
-  vmImage: ubuntu-latest
-
-variables:
-  - group: vg-staging          # contains ARM_CLIENT_ID, ARM_TENANT_ID etc. (WIF)
-  - name: TF_WORKING_DIR
-    value: infra/
-
-stages:
-  - stage: TerraformPlan
-    condition: eq(variables['Build.Reason'], 'PullRequest')
-    jobs:
-      - job: Plan
-        steps:
-          - task: TerraformInstaller@1
-            inputs:
-              terraformVersion: latest
-
-          - task: TerraformTaskV4@4
-            displayName: Terraform Init
-            inputs:
-              provider: azurerm
-              command: init
-              workingDirectory: $(TF_WORKING_DIR)
-              backendServiceArm: sc-azure-staging
-              backendAzureRmResourceGroupName: rg-tfstate
-              backendAzureRmStorageAccountName: stgtfstate
-              backendAzureRmContainerName: tfstate
-              backendAzureRmKey: staging.terraform.tfstate
-
-          - task: TerraformTaskV4@4
-            displayName: Terraform Plan
-            inputs:
-              provider: azurerm
-              command: plan
-              workingDirectory: $(TF_WORKING_DIR)
-              environmentServiceNameAzureRM: sc-azure-staging
-              commandOptions: -out=tfplan
-
-          - script: |
-              terraform show -no-color tfplan > plan.txt
-              echo "##vso[task.uploadsummary]$(System.DefaultWorkingDirectory)/plan.txt"
-            displayName: Post plan to PR summary
-            workingDirectory: $(TF_WORKING_DIR)
-
-  - stage: TerraformApply
-    condition: and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'))
-    jobs:
-      - deployment: Apply
-        environment: staging
-        strategy:
-          runOnce:
-            deploy:
-              steps:
-                - task: TerraformTaskV4@4
-                  displayName: Terraform Apply
-                  inputs:
-                    provider: azurerm
-                    command: apply
-                    workingDirectory: $(TF_WORKING_DIR)
-                    environmentServiceNameAzureRM: sc-azure-staging
-                    commandOptions: -auto-approve
+```text
+terraform/
+  environments/
+    dev/
+    staging/
+    prod/
+  modules/
+    networking/
+    aks/
+    databases/
+    monitoring/
+    storage/
+    eventing/
 ```
 
 ---
 
-## Security
+## Managed Resources via IaC
 
-| Layer | Control |
+- Resource groups
+- VNets/subnets
+- AKS
+- Databases
+- Storage
+- Event Hubs
+- Service Bus
+- Monitoring
+- Key Vault
+- Front Door
+- DNS
+- RBAC
+- Policies
+
+---
+
+## Policy as Code
+
+Use:
+
+- Azure Policy
+- OPA/Gatekeeper
+
+Examples:
+
+- Enforce tagging
+- Enforce private endpoints
+- Restrict public IP creation
+- Enforce encryption
+
+---
+
+# 17. Environment Strategy
+
+## Recommended Environments
+
+| Environment | Purpose |
 |---|---|
-| **Edge** | Cloudflare WAF (OWASP ruleset), DDoS, bot management, mTLS for device-to-cloud |
-| **Network** | Azure VNet with private subnets; all PaaS services on Private Endpoints (no public IPs) |
-| **Identity** | Managed Identities for all Azure services (no credentials in code); Entra ID for staff |
-| **Secrets** | Azure Key Vault; secrets injected at runtime via environment variables or Key Vault references |
-| **API** | APIM enforces JWT validation, per-subscription rate limits, IP allow-listing for venue devices |
-| **Containers** | Non-root containers, read-only filesystems, Trivy scans in CI |
-| **Data** | Encryption at rest (Azure managed keys, or CMK for sensitive data); TLS 1.2+ in transit |
-| **IoT Devices** | Per-device X.509 certs in IoT Hub; certificate rotation via DPS |
-| **Compliance** | Azure Policy enforces tagging, allowed regions, required diagnostics settings |
+| Dev | Developer integration |
+| QA | Automated testing |
+| Staging | Production-like validation |
+| Production | Live workloads |
+
+### Isolation
+
+- Separate subscriptions preferred
+- Separate VNets
+- Separate Key Vaults
+- Separate databases
 
 ---
 
-## Scalability
+# 18. Backup & Disaster Recovery
 
-- **Container Apps**: KEDA-based autoscaling on HTTP requests, Service Bus queue depth, or Event Hub lag
-- **Event Hubs**: Partition count set at creation (32); throughput units auto-inflate
-- **Service Bus**: Premium tier supports 1–16 messaging units, scale independently per queue
-- **Cosmos DB**: Autoscale RU/s (400–40,000 by default); partition key chosen for even distribution
-- **Video**: Container App Jobs scale out FFmpeg workers independently; Blob Storage is unlimited
-- **CDN**: Azure CDN / Cloudflare caches video segments and static assets at edge — origin traffic drops ~80–90%
+## Backups
 
----
+### Databases
 
-## Reliability
+- Automated SQL backups
+- Cosmos DB continuous backup
 
-- **Target SLA**: 99.9% (composed SLA across Azure Container Apps + APIM + Cosmos DB multi-region reads)
-- **Health checks**: APIM health probes + Container Apps liveness/readiness probes
-- **Retry policies**: Exponential backoff on Service Bus consumers; dead-letter queues for poison messages
-- **Circuit breaker**: APIM policies + client-side (Polly in .NET, retry libraries in other stacks)
-- **Chaos testing**: Azure Chaos Studio for failure injection in staging
+### Storage
 
----
+- Blob versioning
+- Immutable storage for critical logs
 
-## Resiliency
+### Kubernetes
 
-- **Redundancy**: Container Apps run across Azure Availability Zones (zone-redundant environment)
-- **Data**: Cosmos DB multi-region reads (write to UK South, read replicas in West Europe); geo-redundant Blob
-- **Service Bus / Event Hubs**: Geo-disaster recovery pairing (secondary namespace in West Europe)
-- **IoT Hub**: Manual failover to secondary region (built-in)
-- **Video**: CDN serves cached segments even if origin is down; long TTLs on immutable video files
-- **RPO/RTO**: RPO < 1 min (Cosmos continuous backup), RTO < 15 min (Container Apps redeploy)
+- Velero backups
+- GitOps source of truth
 
 ---
 
-## Observability
+## DR Objectives
 
-### Three Pillars
-
-| Pillar | Tool |
+| Metric | Target |
 |---|---|
-| **Logs** | All services ship to central Log Analytics Workspace; structured JSON logs |
-| **Metrics** | Azure Monitor metrics + custom app metrics via App Insights |
-| **Traces** | Azure Application Insights distributed tracing (W3C TraceContext) |
-
-### Dashboards & Alerts
-
-- Azure Workbooks for operational dashboards (API latency p50/p95/p99, error rates, queue depth)
-- Grafana (optional, via Azure Managed Grafana) for engineering dashboards
-- PagerDuty / Opsgenie integration via Azure Monitor Action Groups
-- Cloudflare Analytics for edge traffic visibility
-
-### Key Alerts
-
-- API error rate > 1% for 5 minutes → PagerDuty P2
-- Event Hub consumer lag > 10,000 messages → Scale-out + alert
-- Video processing job failure rate > 5% → Alert
-- DLQ depth > 0 → Investigate immediately
+| RPO | < 15 minutes |
+| RTO | < 1 hour |
 
 ---
 
-## Automation
+# 19. Automation
 
-- **IaC**: All infrastructure in Terraform; no manual portal changes (enforced by Azure Policy `deny` on manual resource creation outside IaC)
-- **GitOps**: Infrastructure changes via PR → plan posted as PR summary → review → merge → auto-apply
-- **Config management**: Environment-specific values in Terraform workspaces + ADO Environments with approval gates; secrets in Azure Key Vault linked as ADO Variable Groups
-- **Container builds**: Automated in CI on every commit; image tag = git SHA (`Build.SourceVersion`)
-- **Dependency updates**: Renovate Bot (ADO-compatible) for container base images, Terraform providers, npm/pip packages
-- **Certificate management**: Let's Encrypt via Cloudflare ACME (automatic renewal); IoT device certs rotated via Azure DPS enrollment groups
-- **Cost management**: Azure Cost Management budgets + alerts; dev/staging resources auto-shut-down outside business hours via Azure Automation runbooks
+## Operational Automation
 
----
+### Examples
 
-## Environments
+- Autoscaling
+- Certificate renewal
+- Secret rotation
+- Self-healing pods
+- Scheduled backups
+- Cost optimization jobs
+- Log archival
 
-| Environment | Purpose | Scale | Notes |
-|---|---|---|---|
-| `dev` | Individual developer testing | Minimal (1 replica, shared) | Feature flags off |
-| `staging` | Pre-production, smoke tests | ~20% of prod | Mirrors prod config |
-| `production` | Live | Full autoscale | Blue/green via APIM traffic weights |
+### Infrastructure Automation
 
----
+Everything provisioned through:
 
-## Repo Structure
+- Terraform
+- GitHub Actions
+- GitOps pipelines
 
-```
-.
-├── infra/                  # Terraform (see above)
-├── apps/
-│   ├── api/                # Backend API service
-│   ├── config-web/         # Config web application
-│   ├── log-processor/      # Log ingestion worker
-│   ├── video-processor/    # Video transcoding worker
-│   └── notification-worker/# SMS + Email sender
-├── pipelines/
-│   ├── ci.yml              # Build, test, scan, push to ACR
-│   ├── cd-staging.yml      # Deploy to staging on merge to main
-│   ├── cd-production.yml   # Deploy to production on release branch
-│   └── infra.yml           # Terraform plan (PR) / apply (merge)
-├── docs/
-│   └── adr/                # Architecture Decision Records
-└── README.md               # This file
-```
+No manual infrastructure changes in production.
 
 ---
 
-## Key Architecture Decisions (ADRs)
+# 20. Recommended Technology Stack Summary
 
-1. **Container Apps over AKS**: Lower ops burden; KEDA scaling built-in; revisit if Kubernetes-specific features are needed
-2. **Event Hubs for log ingestion over Kafka**: Native Azure integration; cheaper at moderate scale; Kafka-compatible protocol means future migration is straightforward
-3. **Azure IoT Hub for device communication**: Built-in device registry, per-device auth, and C2D messaging justify the cost over raw Service Bus at scale
-4. **Cloudflare for CDN over Azure CDN alone**: Better global PoP coverage, superior WAF, Workers for edge logic; Azure CDN remains as origin shield
-5. **Azure Communication Services over Twilio**: Single vendor, lower latency to Azure backend, Azure-native billing; Twilio abstraction layer kept as fallback
+| Area | Recommended Technology |
+|---|---|
+| Edge | Cloudflare |
+| Frontend | Azure Static Web Apps |
+| APIs | AKS / Container Apps |
+| Container Registry | Azure Container Registry |
+| Async Messaging | Service Bus + Event Hubs |
+| Relational DB | Azure SQL |
+| NoSQL | Cosmos DB |
+| Cache | Azure Redis |
+| Object Storage | Azure Blob Storage |
+| Video Processing | FFmpeg Workers + Blob Storage |
+| Video Delivery | Cloudflare CDN |
+| Monitoring | Azure Monitor + Grafana |
+| CI/CD | GitHub Actions |
+| IaC | Terraform |
+| Secrets | Azure Key Vault |
+| Authentication | Entra ID |
+
+---
+
+# 21. Assumptions & Trade-Offs (README)
+
+## Assumptions
+
+- Platform must support global access and multiple venues.
+- Devices may produce high-volume telemetry.
+- Video workloads are bursty and compute-intensive.
+- APIs require low latency.
+- Platform requires enterprise-grade security and compliance.
+- Team has Kubernetes operational capability.
+
+---
+
+## Trade-Offs
+
+### AKS vs Container Apps
+
+AKS provides:
+
+- Greater flexibility
+- Better scaling control
+- Better support for complex workloads
+
+But introduces:
+
+- Higher operational overhead
+- More platform management
+
+Container Apps would reduce operational complexity but provide less control.
+
+---
+
+### Event Hubs + Service Bus Separation
+
+Using both services increases architectural complexity but provides:
+
+- Better workload specialization
+- More reliable command processing
+- Better telemetry scalability
+
+---
+
+### Multi-Region Design
+
+Improves resiliency but increases:
+
+- Operational cost
+- Data replication complexity
+- Deployment complexity
+
+---
+
+# 22. Security Summary (README)
+
+- Zero trust networking
+- Private endpoints everywhere possible
+- WAF and DDoS protection at edge
+- RBAC + MFA enforced
+- Secrets stored in Key Vault
+- End-to-end TLS encryption
+- Continuous vulnerability scanning
+- Audit logging enabled globally
+
+---
+
+# 23. Scalability Summary (README)
+
+- Stateless services horizontally scale
+- Event-driven architecture absorbs spikes
+- CDN offloads video traffic
+- Autoscaling across APIs and workers
+- Globally distributed edge via Cloudflare
+
+---
+
+# 24. Reliability Summary (README)
+
+- Zone-redundant architecture
+- Managed PaaS services
+- Queue-based decoupling
+- Automated failover support
+- Health probes and auto-recovery
+
+---
+
+# 25. Resiliency Summary (README)
+
+- Retry and circuit-breaker patterns
+- Dead-letter queues
+- Multi-region DR capability
+- Immutable infrastructure
+- GitOps rollback support
+
+---
+
+# 26. Observability Summary (README)
+
+- Centralized logs and metrics
+- Distributed tracing
+- Real-time alerting
+- Dashboards for business + infrastructure metrics
+- Long-term telemetry retention
+
+---
+
+# 27. Automation Summary (README)
+
+- Full IaC provisioning
+- Automated CI/CD pipelines
+- Automated scaling
+- Automated certificate and secret rotation
+- Automated backup policies
+- GitOps deployment workflows
+
+---
+
+# 28. Final Recommendation
+
+For this workload, the recommended production architecture is:
+
+- Cloudflare at the edge
+- AKS for core workloads
+- Event Hubs + Service Bus for asynchronous communication
+- Azure SQL + Cosmos DB hybrid data strategy
+- Blob Storage + CDN for media
+- GitHub Actions + Terraform + GitOps for automation
+- Full observability using Azure Monitor and OpenTelemetry
+
+This architecture balances:
+
+- scalability
+- operational reliability
+- enterprise security
+- global performance
+- future extensibility
+
+while remaining cloud-native and highly automatable.
+
